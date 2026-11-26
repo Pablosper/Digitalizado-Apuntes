@@ -24,11 +24,7 @@
     },
     "web": {
       "favicon": "./assets/favicon.png"
-    }
-  }
-}
-{
-  "expo": {
+    },
     "plugins": [
       [
         "expo-media-library",
