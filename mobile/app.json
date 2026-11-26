@@ -27,3 +27,17 @@
     }
   }
 }
+{
+  "expo": {
+    "plugins": [
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "Permite guardar las hojas digitalizadas en tu galería.",
+          "savePhotosPermission": "Permite guardar las hojas digitalizadas en tu galería.",
+          "isAccessMediaLocationEnabled": true
+        }
+      ]
+    ]
+  }
+}

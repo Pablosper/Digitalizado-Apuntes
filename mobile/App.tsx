@@ -15,31 +15,44 @@ import {
   View,
 } from "react-native";
 import Svg, { Circle } from "react-native-svg";
+import { captureRef } from "react-native-view-shot";
 
 type Point = { x: number; y: number };
-type HistoryItem = { uri: string; points: Point[]; brushSize: number };
+type HistoryItem = {
+  uri: string;
+  brightness: number;
+  contrast: number;
+  angle: number;
+};
 
 export default function App() {
+  const previewRef = useRef<any>(null);
   const [imageUri, setImageUri] = useState<string | null>(null);
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [redo, setRedo] = useState<HistoryItem[]>([]);
   const [points, setPoints] = useState<Point[]>([]);
   const [brushSize, setBrushSize] = useState(18);
-  const [candidate, setCandidate] = useState<HistoryItem | null>(null);
+  const [eraseMode, setEraseMode] = useState(false);
   const [brightness, setBrightness] = useState(0);
   const [contrast, setContrast] = useState(0);
   const [angle, setAngle] = useState(0);
   const [notice, setNotice] = useState("Selecciona una imagen para comenzar.");
 
+  const hasImageRef = useRef(false);
+  hasImageRef.current = Boolean(imageUri);
+
   const panResponder = useRef(
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
       onMoveShouldSetPanResponder: () => true,
+      onPanResponderTerminationRequest: () => false,
       onPanResponderGrant: (event) => {
-        if (!imageUri) return;
+        if (!hasImageRef.current) return;
+        setEraseMode(false);
         addPoint(event.nativeEvent.locationX, event.nativeEvent.locationY);
       },
       onPanResponderMove: (event) => {
+        if (!hasImageRef.current) return;
         addPoint(event.nativeEvent.locationX, event.nativeEvent.locationY);
       },
     })
@@ -47,6 +60,11 @@ export default function App() {
 
   function addPoint(x: number, y: number) {
     setPoints((items) => [...items, { x, y }]);
+  }
+
+  function pushHistory(uri: string, b = brightness, c = contrast, a = angle) {
+    setHistory((items) => [...items, { uri, brightness: b, contrast: c, angle: a }]);
+    setRedo([]);
   }
 
   async function openImage() {
@@ -65,15 +83,93 @@ export default function App() {
     if (result.canceled || !result.assets[0]) return;
     const uri = result.assets[0].uri;
     setImageUri(uri);
-    setHistory([{ uri, points: [], brushSize }]);
-    setRedo([]);
+    setBrightness(0);
+    setContrast(0);
+    setAngle(0);
     setPoints([]);
-    setNotice("Arrastra sobre el texto y pulsa Aplicar cambio.");
+    setEraseMode(false);
+    setHistory([{ uri, brightness: 0, contrast: 0, angle: 0 }]);
+    setRedo([]);
+    setNotice("Imagen cargada. Ajusta parámetros o marca con el dedo para borrar.");
+  }
+
+  async function bakeCurrentView(nextNotice?: string) {
+    if (!previewRef.current || !imageUri) return null;
+    try {
+      const capturedUri = await captureRef(previewRef, {
+        format: "png",
+        quality: 1,
+      });
+      setImageUri(capturedUri);
+      setBrightness(0);
+      setContrast(0);
+      setAngle(0);
+      setPoints([]);
+      setEraseMode(false);
+      pushHistory(capturedUri, 0, 0, 0);
+      if (nextNotice) setNotice(nextNotice);
+      return capturedUri;
+    } catch {
+      setNotice("No se pudo procesar la vista previa.");
+      return null;
+    }
+  }
+
+  function waitFrames(count = 3) {
+    return new Promise<void>((resolve) => {
+      let remaining = count;
+      function step() {
+        remaining -= 1;
+        if (remaining <= 0) {
+          resolve();
+        } else {
+          requestAnimationFrame(step);
+        }
+      }
+      requestAnimationFrame(step);
+    });
+  }
+
+  async function applyErase() {
+    if (!imageUri || !points.length) {
+      setNotice("Marca primero con el dedo el texto que quieres borrar.");
+      return;
+    }
+    setEraseMode(true);
+    setNotice("Aplicando borrado...");
+    await waitFrames(3);
+    await bakeCurrentView("Zona borrada y aplicada a la hoja.");
+  }
+
+  async function rotate90(delta: number) {
+    if (!imageUri) return;
+    const baseUri =
+      brightness !== 0 || contrast !== 0 || angle !== 0 || points.length > 0
+        ? (await bakeCurrentView()) ?? imageUri
+        : imageUri;
+
+    const result = await ImageManipulator.manipulateAsync(
+      baseUri,
+      [{ rotate: delta }],
+      { compress: 1, format: ImageManipulator.SaveFormat.PNG }
+    );
+    setImageUri(result.uri);
+    pushHistory(result.uri, 0, 0, 0);
+    setNotice(`Rotación aplicada (${delta > 0 ? "+90°" : "-90°"}).`);
+  }
+
+  function autoEnhance() {
+    if (!imageUri) return;
+    setBrightness(15);
+    setContrast(30);
+    setNotice("Mejora automática aplicada (brillo y contraste).");
   }
 
   function undo() {
-    if (candidate) {
-      cancelChange();
+    if (points.length > 0) {
+      setPoints([]);
+      setEraseMode(false);
+      setNotice("Selección descartada.");
       return;
     }
     if (history.length < 2) return;
@@ -82,82 +178,83 @@ export default function App() {
     setRedo((items) => [current, ...items]);
     setHistory((items) => items.slice(0, -1));
     setImageUri(previous.uri);
+    setBrightness(previous.brightness);
+    setContrast(previous.contrast);
+    setAngle(previous.angle);
     setPoints([]);
+    setNotice("Paso deshecho.");
   }
 
   function redoChange() {
-    if (candidate) return;
     if (!redo.length) return;
     const next = redo[0];
     setHistory((items) => [...items, next]);
     setRedo((items) => items.slice(1));
     setImageUri(next.uri);
-    setPoints(next.points);
-  }
-
-  function applyChange() {
-    if (!imageUri || !points.length) {
-      setNotice("Marca primero un área con el dedo.");
-      return;
-    }
-    const item = { uri: imageUri, points: [...points], brushSize };
-    setCandidate(item);
-    setRedo([]);
-    setNotice("Vista previa creada. Confirma o cancela el cambio.");
-  }
-
-  async function applyImageAdjustments() {
-    if (!imageUri) {
-      setNotice("Carga primero una imagen.");
-      return;
-    }
-
-    const actions: ImageManipulator.Action[] = [];
-    if (angle !== 0) actions.push({ rotate: angle });
-    const result = await ImageManipulator.manipulateAsync(
-      imageUri,
-      actions,
-      { compress: 1, format: ImageManipulator.SaveFormat.PNG }
-    );
-    const item = { uri: result.uri, points: [], brushSize };
-    setCandidate(item);
-    setNotice("Vista previa de ajustes creada.");
-  }
-
-  function confirmChange() {
-    if (!candidate) return;
-    setHistory((items) => [...items, candidate]);
-    setImageUri(candidate.uri);
-    setCandidate(null);
+    setBrightness(next.brightness);
+    setContrast(next.contrast);
+    setAngle(next.angle);
     setPoints([]);
-    setNotice("Cambio confirmado.");
-  }
-
-  function cancelChange() {
-    setCandidate(null);
-    setPoints([]);
-    setNotice("Vista previa cancelada.");
+    setNotice("Paso rehecho.");
   }
 
   function reset() {
     if (!history.length) return;
-    setImageUri(history[0].uri);
-    setHistory([history[0]]);
-    setRedo([]);
+    const initial = history[0];
+    setImageUri(initial.uri);
+    setBrightness(0);
+    setContrast(0);
+    setAngle(0);
     setPoints([]);
+    setEraseMode(false);
+    setHistory([initial]);
+    setRedo([]);
     setNotice("Se volvió al archivo original.");
   }
 
   async function save() {
-    if (!imageUri) return;
-    const permission = await MediaLibrary.requestPermissionsAsync();
-    if (!permission.granted) {
-      Alert.alert("Permiso requerido", "Autoriza guardar en la galería.");
+    if (!imageUri) {
+      setNotice("Imagen no cargada.");
       return;
     }
-    await MediaLibrary.saveToLibraryAsync(imageUri);
-    setNotice("Imagen guardada en la galería.");
+
+    try {
+      const permission = await MediaLibrary.requestPermissionsAsync(true);
+      if (!permission.granted) {
+        Alert.alert("Permiso requerido", "Autoriza guardar en la galería.");
+        return;
+      }
+
+      let uriToSave = imageUri;
+      if (brightness !== 0 || contrast !== 0 || angle !== 0 || points.length > 0) {
+        const baked = await bakeCurrentView();
+        if (baked) uriToSave = baked;
+      }
+
+      await MediaLibrary.saveToLibraryAsync(uriToSave);
+      setNotice("Imagen guardada en la galería.");
+    } catch (error: any) {
+      console.error("Error al guardar:", error);
+      setNotice(`No se pudo guardar: ${error?.message ?? String(error)}`);
+    }
   }
+
+  // Cálculo visual inmediato de brillo y contraste sobre el lienzo
+  const brightnessOverlayColor =
+    brightness > 0
+      ? `rgba(255, 255, 255, ${Math.min(0.65, brightness / 120)})`
+      : brightness < 0
+      ? `rgba(0, 0, 0, ${Math.min(0.65, Math.abs(brightness) / 120)})`
+      : "transparent";
+
+  const contrastOverlayColor =
+    contrast > 0
+      ? `rgba(255, 255, 255, ${Math.min(0.35, contrast / 220)})`
+      : contrast < 0
+      ? `rgba(128, 128, 128, ${Math.min(0.55, Math.abs(contrast) / 140)})`
+      : "transparent";
+
+  const scaleForRotation = angle !== 0 ? 0.92 : 1;
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -173,15 +270,51 @@ export default function App() {
         </Pressable>
 
         <View
+          ref={previewRef}
           collapsable={false}
           style={styles.preview}
           {...(panResponder.panHandlers as object)}
         >
           {imageUri ? (
-            <Image source={{ uri: imageUri }} style={styles.image} resizeMode="contain" />
+            <View
+              style={[
+                styles.canvasStage,
+                {
+                  transform: [
+                    { rotate: `${angle}deg` },
+                    { scale: scaleForRotation },
+                  ],
+                },
+              ]}
+            >
+              <Image
+                source={{ uri: imageUri }}
+                style={styles.image}
+                resizeMode="contain"
+              />
+              {brightness !== 0 && (
+                <View
+                  pointerEvents="none"
+                  style={[
+                    StyleSheet.absoluteFill,
+                    { backgroundColor: brightnessOverlayColor },
+                  ]}
+                />
+              )}
+              {contrast !== 0 && (
+                <View
+                  pointerEvents="none"
+                  style={[
+                    StyleSheet.absoluteFill,
+                    { backgroundColor: contrastOverlayColor },
+                  ]}
+                />
+              )}
+            </View>
           ) : (
             <Text style={styles.placeholder}>Vista previa</Text>
           )}
+
           {points.length > 0 && (
             <Svg style={StyleSheet.absoluteFill} pointerEvents="none">
               {points.map((point, index) => (
@@ -190,7 +323,7 @@ export default function App() {
                   cx={point.x}
                   cy={point.y}
                   r={brushSize}
-                  fill="rgba(255, 80, 80, 0.55)"
+                  fill={eraseMode ? "#ffffff" : "rgba(49, 94, 251, 0.35)"}
                 />
               ))}
             </Svg>
@@ -202,31 +335,85 @@ export default function App() {
         {imageUri && (
           <View style={styles.adjustments}>
             <View style={styles.adjustmentRow}>
-              <Text style={styles.adjustmentLabel}>Brillo {brightness}</Text>
-              <Text style={styles.adjustmentLabel}>Contraste {contrast}</Text>
-              <Text style={styles.adjustmentLabel}>Rotación {angle}°</Text>
+              <Text style={styles.adjustmentLabel}>Brillo: {brightness}</Text>
+              <Text style={styles.adjustmentLabel}>Contraste: {contrast}</Text>
+              <Text style={styles.adjustmentLabel}>Giro: {angle}°</Text>
             </View>
+
             <View style={styles.adjustmentButtons}>
-              <Pressable style={styles.action} onPress={() => setBrightness((value) => value - 10)}>
+              <Pressable
+                style={styles.action}
+                onPress={() => setBrightness((v) => Math.max(-60, v - 10))}
+              >
                 <Text style={styles.actionText}>Brillo -</Text>
               </Pressable>
-              <Pressable style={styles.action} onPress={() => setBrightness((value) => value + 10)}>
+              <Pressable
+                style={styles.action}
+                onPress={() => setBrightness((v) => Math.min(60, v + 10))}
+              >
                 <Text style={styles.actionText}>Brillo +</Text>
               </Pressable>
-              <Pressable style={styles.action} onPress={() => setContrast((value) => value - 10)}>
+              <Pressable
+                style={styles.action}
+                onPress={() => setContrast((v) => Math.max(-60, v - 10))}
+              >
                 <Text style={styles.actionText}>Contraste -</Text>
               </Pressable>
-              <Pressable style={styles.action} onPress={() => setContrast((value) => value + 10)}>
+              <Pressable
+                style={styles.action}
+                onPress={() => setContrast((v) => Math.min(60, v + 10))}
+              >
                 <Text style={styles.actionText}>Contraste +</Text>
               </Pressable>
-              <Pressable style={styles.action} onPress={() => setAngle((value) => (value - 1 + 360) % 360)}>
-                <Text style={styles.actionText}>Girar -</Text>
+              <Pressable
+                style={styles.action}
+                onPress={() => setAngle((v) => v - 2)}
+              >
+                <Text style={styles.actionText}>Enderezar -</Text>
               </Pressable>
-              <Pressable style={styles.action} onPress={() => setAngle((value) => (value + 1) % 360)}>
-                <Text style={styles.actionText}>Girar +</Text>
+              <Pressable
+                style={styles.action}
+                onPress={() => setAngle((v) => v + 2)}
+              >
+                <Text style={styles.actionText}>Enderezar +</Text>
               </Pressable>
-              <Pressable style={[styles.action, styles.confirm]} onPress={applyImageAdjustments}>
-                <Text style={[styles.actionText, styles.confirmText]}>Previsualizar ajustes</Text>
+              <Pressable style={styles.action} onPress={() => rotate90(-90)}>
+                <Text style={styles.actionText}>Girar -90°</Text>
+              </Pressable>
+              <Pressable style={styles.action} onPress={() => rotate90(90)}>
+                <Text style={styles.actionText}>Girar +90°</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.action, styles.confirm]}
+                onPress={autoEnhance}
+              >
+                <Text style={[styles.actionText, styles.confirmText]}>
+                  Mejorar auto
+                </Text>
+              </Pressable>
+              <Pressable
+                style={styles.action}
+                onPress={() =>
+                  bakeCurrentView("Ajustes aplicados permanentemente a la hoja.")
+                }
+              >
+                <Text style={styles.actionText}>Fijar ajustes</Text>
+              </Pressable>
+            </View>
+
+            <View style={styles.adjustmentRow}>
+              <Text style={styles.adjustmentLabel}>Goma: {brushSize}px</Text>
+              <Pressable
+                style={styles.smallBtn}
+                onPress={() => setBrushSize((s) => Math.max(8, s - 6))}
+              >
+                <Text style={styles.actionText}>Goma -</Text>
+              </Pressable>
+              <Pressable
+                style={styles.smallBtn}
+                onPress={() => setBrushSize((s) => Math.min(48, s + 6))}
+              >
+                <Text style={styles.actionText}>Goma +</Text>
               </Pressable>
             </View>
           </View>
@@ -234,36 +421,36 @@ export default function App() {
 
         <View style={styles.actions}>
           <Pressable
-            style={[styles.action, styles.save]}
-            onPress={applyChange}
-            disabled={!imageUri || !points.length || !!candidate}
-          >
-            <Text style={[styles.actionText, styles.saveText]}>Aplicar cambio</Text>
-          </Pressable>
-          <Pressable
             style={[styles.action, styles.confirm]}
-            onPress={confirmChange}
-            disabled={!candidate}
+            onPress={applyErase}
+            disabled={!imageUri || !points.length}
           >
-            <Text style={[styles.actionText, styles.confirmText]}>Confirmar</Text>
+            <Text style={[styles.actionText, styles.confirmText]}>
+              Aplicar borrado
+            </Text>
           </Pressable>
           <Pressable
             style={styles.action}
-            onPress={cancelChange}
-            disabled={!candidate}
+            onPress={undo}
+            disabled={history.length < 2 && points.length === 0}
           >
-            <Text style={styles.actionText}>Cancelar</Text>
-          </Pressable>
-          <Pressable style={styles.action} onPress={undo} disabled={history.length < 2}>
             <Text style={styles.actionText}>Deshacer</Text>
           </Pressable>
-          <Pressable style={styles.action} onPress={redoChange} disabled={!redo.length}>
+          <Pressable
+            style={styles.action}
+            onPress={redoChange}
+            disabled={!redo.length}
+          >
             <Text style={styles.actionText}>Rehacer</Text>
           </Pressable>
           <Pressable style={styles.action} onPress={reset} disabled={!imageUri}>
             <Text style={styles.actionText}>Inicio</Text>
           </Pressable>
-          <Pressable style={[styles.action, styles.save]} onPress={save} disabled={!imageUri}>
+          <Pressable
+            style={[styles.action, styles.save]}
+            onPress={save}
+            disabled={!imageUri}
+          >
             <Text style={[styles.actionText, styles.saveText]}>Guardar</Text>
           </Pressable>
         </View>
@@ -294,14 +481,46 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
+  canvasStage: {
+    width: "100%",
+    height: 420,
+    alignItems: "center",
+    justifyContent: "center",
+  },
   image: { width: "100%", height: 420 },
   placeholder: { color: "#7a8699" },
-  notice: { minHeight: 40, color: "#65758b", textAlign: "center" },
+  notice: { minHeight: 32, color: "#65758b", textAlign: "center" },
   actions: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
-  adjustments: { gap: 8, borderRadius: 12, backgroundColor: "#fff", padding: 10 },
-  adjustmentRow: { flexDirection: "row", justifyContent: "space-between", gap: 8 },
-  adjustmentLabel: { flex: 1, color: "#65758b", textAlign: "center", fontSize: 12 },
+  adjustments: {
+    gap: 10,
+    borderRadius: 12,
+    backgroundColor: "#fff",
+    padding: 10,
+  },
+  adjustmentRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+  },
+  adjustmentLabel: {
+    flex: 1,
+    color: "#65758b",
+    textAlign: "center",
+    fontSize: 12,
+    fontWeight: "600",
+  },
   adjustmentButtons: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  smallBtn: {
+    paddingHorizontal: 14,
+    height: 36,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: "#d3dae6",
+    backgroundColor: "#f8fafc",
+    alignItems: "center",
+    justifyContent: "center",
+  },
   action: {
     flexGrow: 1,
     minWidth: 92,
@@ -312,8 +531,9 @@ const styles = StyleSheet.create({
     backgroundColor: "#fff",
     alignItems: "center",
     justifyContent: "center",
+    paddingHorizontal: 8,
   },
-  actionText: { color: "#172033", fontWeight: "700" },
+  actionText: { color: "#172033", fontWeight: "700", fontSize: 13 },
   save: { backgroundColor: "#172033", borderColor: "#172033" },
   saveText: { color: "#fff" },
   confirm: { backgroundColor: "#16866a", borderColor: "#16866a" },
